@@ -1,0 +1,8 @@
+{
+  // Keep this comment when editing local-source.
+  "mcp": {
+    "local-source": { "type": "local", "command": ["fixture", "--stdio"], "enabled": true }
+  },
+  "instructions": ["team-guide.md"],
+  "plugin": ["example-plugin-from-catalog"]
+}

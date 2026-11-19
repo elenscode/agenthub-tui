@@ -1,0 +1,4 @@
+# The global registration has the same name.
+[mcp_servers.handbook]
+command = "fixture-project"
+args = ["--read"]

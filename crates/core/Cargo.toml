@@ -1,0 +1,32 @@
+[package]
+name = "agenthub-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+toml_edit = { version = "0.22", features = ["serde"] }
+jsonc-parser = { version = "0.26", features = ["cst", "serde"] }
+serde_yaml = "0.9"
+regex = "1"
+walkdir = "2"
+similar = "2"
+fs2 = "0.4"
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+futures-util = "0.3"
+base64 = "0.22"
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Storage_FileSystem"] }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+[dev-dependencies]
+chacha20poly1305 = "0.10"
+
