@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 pub fn hash(bytes: &[u8]) -> String {
@@ -161,6 +161,13 @@ pub struct Asset {
     pub evidence: Vec<String>,
     pub permission: Permission,
 }
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DiscoveryPaths {
+    pub files: BTreeSet<PathBuf>,
+    pub directories: BTreeSet<PathBuf>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     pub assets: Vec<Asset>,
@@ -168,8 +175,19 @@ pub struct Registry {
     pub issues: Vec<String>,
     #[serde(skip)]
     pub(crate) search_index: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub(crate) discovery_paths: DiscoveryPaths,
 }
 impl Registry {
+    pub fn watches_change_at(&self, path: &Path) -> bool {
+        let paths = &self.discovery_paths;
+        paths.files.iter().any(|file| file.starts_with(path))
+            || paths
+                .directories
+                .iter()
+                .any(|dir| path.starts_with(dir) || dir.starts_with(path))
+    }
+
     pub fn reindex(&mut self) {
         self.search_index = self
             .assets
