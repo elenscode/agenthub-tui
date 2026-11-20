@@ -34,7 +34,7 @@ pub fn parse(path: &Path, raw: &str) -> Result<Value> {
     }
 }
 fn executable(p: Provider) -> Option<Command> {
-    let name = format!("{}{}", p.binary(), std::env::consts::EXE_SUFFIX);
+    let name = p.binary();
     let mut dirs: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .filter(|d| d.is_absolute())
         .collect();
@@ -46,50 +46,15 @@ fn executable(p: Provider) -> Option<Command> {
             home.join(".cargo/bin"),
         ]);
     }
-    let paths = dirs.into_iter().map(|d| d.join(&name));
-    #[cfg(windows)]
-    let paths = paths.chain(windows_npm_binaries(p));
-    paths.into_iter().find(|f| f.is_file()).map(Command::new)
-}
-#[cfg(windows)]
-fn windows_npm_binaries(p: Provider) -> Vec<PathBuf> {
-    let Some(base) = std::env::var_os("APPDATA").map(PathBuf::from) else {
-        return vec![];
-    };
-    let npm = base.join("npm/node_modules");
-    let (arch, triple) = if cfg!(target_arch = "aarch64") {
-        ("arm64", "aarch64-pc-windows-msvc")
-    } else {
-        ("x64", "x86_64-pc-windows-msvc")
-    };
-    match p {
-        Provider::Claude => vec![
-            npm.join("@anthropic-ai/claude-code/bin/claude.exe"),
-            npm.join(format!("@anthropic-ai/claude-code-win32-{arch}/claude.exe")),
-        ],
-        Provider::OpenCode => [npm.clone(), npm.join("opencode-ai/node_modules")]
-            .into_iter()
-            .map(|n| n.join(format!("opencode-windows-{arch}/bin/opencode.exe")))
-            .collect(),
-        Provider::Codex => [npm.clone(), npm.join("@openai/codex/node_modules")]
-            .into_iter()
-            .map(|n| {
-                n.join(format!(
-                    "@openai/codex-win32-{arch}/vendor/{triple}/codex/codex.exe"
-                ))
-            })
-            .chain(Some(npm.join(format!(
-                "@openai/codex/vendor/{triple}/codex/codex.exe"
-            ))))
-            .collect(),
-    }
+    dirs.into_iter()
+        .map(|d| d.join(name))
+        .find(|f| f.is_file())
+        .map(Command::new)
 }
 pub async fn version(p: Provider, cancel: &Cancel) -> Option<String> {
     let mut cmd = executable(p)?;
     cmd.arg("--version").current_dir(std::env::temp_dir());
-    let bytes = processes::run(&mut cmd, vec![], 8192, 8, cancel)
-        .await
-        .ok()?;
+    let bytes = processes::run(&mut cmd, 8192, 8, cancel).await.ok()?;
     let s = std::str::from_utf8(&bytes).ok()?;
     s.split_whitespace()
         .find(|w| {
@@ -116,24 +81,6 @@ pub fn identity(path: &Path, env: &str) -> String {
             return format!("{env}:{}:{}", m.dev(), m.ino());
         }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-        };
-        if let Ok(f) = fs::File::open(path) {
-            unsafe {
-                let mut i: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
-                if GetFileInformationByHandle(f.as_raw_handle() as _, &mut i) != 0 {
-                    return format!(
-                        "{env}:{}:{}:{}",
-                        i.dwVolumeSerialNumber, i.nFileIndexHigh, i.nFileIndexLow
-                    );
-                }
-            }
-        }
-    }
     format!(
         "{env}:{}",
         path.canonicalize()
@@ -146,31 +93,6 @@ pub fn valid_name(s: &str) -> bool {
         && s.len() <= 64
         && s.bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-        && !matches!(
-            s.to_ascii_uppercase().as_str(),
-            "CON"
-                | "PRN"
-                | "AUX"
-                | "NUL"
-                | "COM1"
-                | "COM2"
-                | "COM3"
-                | "COM4"
-                | "COM5"
-                | "COM6"
-                | "COM7"
-                | "COM8"
-                | "COM9"
-                | "LPT1"
-                | "LPT2"
-                | "LPT3"
-                | "LPT4"
-                | "LPT5"
-                | "LPT6"
-                | "LPT7"
-                | "LPT8"
-                | "LPT9"
-        )
 }
 pub fn frontmatter(raw: &str) -> Result<(Value, String)> {
     let normalized = raw.replace("\r\n", "\n");
@@ -259,44 +181,11 @@ pub fn policy_files(c: &Context, p: Provider) -> Vec<PathBuf> {
             c.policy.join("managed-mcp.json"),
             c.policy.join("managed-settings.d"),
         ],
-        Provider::Codex => vec![if cfg!(windows) {
-            std::env::var_os("ProgramData")
-                .map(PathBuf::from)
-                .unwrap_or("C:/ProgramData".into())
-                .join("OpenAI/Codex/requirements.toml")
-        } else {
-            "/etc/codex/requirements.toml".into()
-        }],
-        Provider::OpenCode => vec![if cfg!(windows) {
-            std::env::var_os("ProgramData")
-                .map(PathBuf::from)
-                .unwrap_or("C:/ProgramData".into())
-                .join("opencode")
-        } else {
-            "/etc/opencode".into()
-        }],
+        Provider::Codex => vec!["/etc/codex/requirements.toml".into()],
+        Provider::OpenCode => vec!["/etc/opencode".into()],
     }
 }
 pub fn policy_clear(c: &Context, p: Provider) -> bool {
-    #[cfg(windows)]
-    if p == Provider::Claude {
-        use windows_sys::Win32::System::Registry::*;
-        let path: Vec<u16> = r"SOFTWARE\Policies\ClaudeCode"
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
-        for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
-            let mut key = std::ptr::null_mut();
-            let status = unsafe { RegOpenKeyExW(hive, path.as_ptr(), 0, KEY_READ, &mut key) };
-            if status == 0 {
-                unsafe { RegCloseKey(key) };
-                return false;
-            }
-            if status != 2 && status != 3 {
-                return false;
-            }
-        }
-    }
     policy_files(c, p)
         .iter()
         .all(|f| matches!(f.try_exists(), Ok(false)))
@@ -916,7 +805,7 @@ pub async fn verify_codex(c: &Context, r: &mut Registry, cancel: &Cancel) {
         cmd.current_dir(&c.project)
             .env("CODEX_HOME", &c.codex)
             .args(["mcp", "get", "--json", "--", &name]);
-        let Ok(bytes) = processes::run(&mut cmd, vec![], 65536, 3, cancel).await else {
+        let Ok(bytes) = processes::run(&mut cmd, 65536, 3, cancel).await else {
             continue;
         };
         let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {

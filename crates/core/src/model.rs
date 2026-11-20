@@ -92,15 +92,9 @@ impl Context {
     }
     pub fn local(project: &Path) -> anyhow::Result<Self> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory unavailable"))?;
-        let mut c = Self::isolated(
-            home,
-            project.canonicalize()?,
-            if cfg!(windows) {
-                "Windows".into()
-            } else {
-                "Linux".into()
-            },
-        );
+        let project = project.canonicalize()?;
+        anyhow::ensure!(project.is_dir(), "Expected a project directory");
+        let mut c = Self::isolated(home, project, "Linux".into());
         let envpath = |k| {
             std::env::var_os(k)
                 .map(PathBuf::from)
@@ -111,13 +105,7 @@ impl Context {
             .map(|p| p.join("opencode"))
             .unwrap_or(c.opencode);
         c.claude = envpath("CLAUDE_CONFIG_DIR").unwrap_or(c.claude);
-        c.policy = if cfg!(windows) {
-            envpath("ProgramFiles")
-                .unwrap_or("C:/Program Files".into())
-                .join("ClaudeCode")
-        } else {
-            "/etc/claude-code".into()
-        };
+        c.policy = "/etc/claude-code".into();
         Ok(c)
     }
     pub fn config(&self, p: Provider, s: Scope) -> PathBuf {

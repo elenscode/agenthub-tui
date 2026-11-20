@@ -14,19 +14,15 @@ dependencies = [
 
 [[package]]
 name = "agenthub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agenthub-core",
  "anyhow",
- "chacha20poly1305",
  "crossterm",
  "dirs",
- "hex",
  "notify",
  "ratatui",
- "serde",
  "serde_json",
- "sha2",
  "similar",
  "tempfile",
  "tokio",
@@ -34,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "agenthub-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -57,18 +53,6 @@ dependencies = [
  "toml_edit",
  "uuid",
  "walkdir",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "agenthub-wsl-helper"
-version = "0.1.0"
-dependencies = [
- "agenthub-core",
- "anyhow",
- "libc",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
