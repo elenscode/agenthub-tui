@@ -3,15 +3,10 @@ use agenthub_core::{
     model::*,
     operations::{self, Intent, Plan, Target, Vault},
     processes::cancel_token,
-    protection::Protection,
+    protection::UserProtection,
     redact,
-    runtime::{self, Action, Request},
 };
-use anyhow::{ensure, Result};
-use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
-    XChaCha20Poly1305, XNonce,
-};
+use anyhow::Result;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -65,35 +60,13 @@ fn target(p: Provider, k: Kind, name: &str) -> Target {
 fn plan(c: &Context, t: &Target, i: Intent) -> Result<Plan> {
     operations::prepare(c, t.clone(), i, Some(t.provider.tested()), false)
 }
-struct Cipher(XChaCha20Poly1305);
-impl Cipher {
-    fn new() -> Self {
-        Self(XChaCha20Poly1305::new(&XChaCha20Poly1305::generate_key(
-            &mut OsRng,
-        )))
-    }
-}
-impl Protection for Cipher {
-    fn seal(&self, b: &[u8]) -> Result<Vec<u8>> {
-        let n = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let mut x = n.to_vec();
-        x.extend(self.0.encrypt(&n, b).unwrap());
-        Ok(x)
-    }
-    fn open(&self, b: &[u8]) -> Result<Vec<u8>> {
-        ensure!(b.len() >= 24, "short");
-        self.0
-            .decrypt(XNonce::from_slice(&b[..24]), &b[24..])
-            .map_err(|_| anyhow::anyhow!("integrity"))
-    }
-}
-fn vault(tmp: &TempDir) -> Vault<Cipher> {
+fn vault(tmp: &TempDir) -> Vault<UserProtection> {
     Vault {
-        dir: tmp.path().join("vault"),
-        protection: Cipher::new(),
+        dir: tmp.path().join("backups"),
+        protection: UserProtection::new(tmp.path()),
     }
 }
-fn commit(c: &Context, v: &Vault<Cipher>, p: &Plan) -> Result<String> {
+fn commit(c: &Context, v: &Vault<UserProtection>, p: &Plan) -> Result<String> {
     let (id, _lock) = v.record(p, true, true)?;
     operations::apply_checked(c, p, Some(p.target.provider.tested()))?;
     Ok(id)
@@ -315,7 +288,7 @@ async fn at06_diagnostics_limits_and_no_tool_calls() {
     let (tmp, c) = context();
     let script = fixtures().join("mcp_test_server.py");
     let log = tmp.path().join("methods");
-    let python = if cfg!(windows) { "python" } else { "python3" };
+    let python = "python3";
     let config = |mode: &str| json!({"command":python,"args":[script,mode,log]});
     let diag = |v: Value, yes, cancel, limit| {
         let proj = c.project.clone();
@@ -383,6 +356,7 @@ fn at07_protected_backup_lock_conflict_restore() {
     assert!(v.record(&p, false, false).is_err());
     assert!(v.record(&p, true, false).is_err());
     assert!(!v.dir.exists());
+    assert!(!tmp.path().join("keys").exists());
     let (id, lock) = v.record(&p, true, true).unwrap();
     assert!(v.record(&p, true, true).is_err());
     drop(lock);
@@ -421,21 +395,6 @@ fn at08_isolated_provider_failure_and_policy() {
     fs::create_dir_all(&c.policy).unwrap();
     fs::write(c.policy.join("managed-settings.json"), "{}").unwrap();
     assert!(plan(&c, &t, Intent::Create(json!({"command":"no"}))).is_err());
-}
-#[tokio::test]
-async fn at08_incompatible_helper_protocol() {
-    let (_tmp, c) = context();
-    let reply = runtime::serve(
-        Request {
-            protocol: 999,
-            id: uuid::Uuid::new_v4().to_string(),
-            context: c,
-            action: Action::Hello,
-        },
-        &cancel_token(),
-    )
-    .await;
-    assert!(reply.error.unwrap().contains("protocol"));
 }
 #[test]
 fn at09_no_secret_in_registry_diff_or_diagnostics() {

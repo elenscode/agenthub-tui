@@ -103,41 +103,7 @@ fn entry(data: Vec<u8>) -> Entry {
     }
 }
 fn safe_part(s: &str) -> bool {
-    !s.is_empty()
-        && s != "."
-        && s != ".."
-        && !s.ends_with([' ', '.'])
-        && !s.contains(['\\', '/', ':', '\0', '*', '?', '"', '<', '>', '|'])
-        && !s.chars().any(char::is_control)
-        && !matches!(
-            s.split('.')
-                .next()
-                .unwrap_or("")
-                .to_ascii_uppercase()
-                .as_str(),
-            "CON"
-                | "PRN"
-                | "AUX"
-                | "NUL"
-                | "COM1"
-                | "COM2"
-                | "COM3"
-                | "COM4"
-                | "COM5"
-                | "COM6"
-                | "COM7"
-                | "COM8"
-                | "COM9"
-                | "LPT1"
-                | "LPT2"
-                | "LPT3"
-                | "LPT4"
-                | "LPT5"
-                | "LPT6"
-                | "LPT7"
-                | "LPT8"
-                | "LPT9"
-        )
+    !s.is_empty() && s != "." && s != ".." && !s.contains('/') && !s.chars().any(char::is_control)
 }
 pub fn check_path(path: &Path) -> Result<()> {
     ensure!(
@@ -151,14 +117,6 @@ pub fn check_path(path: &Path) -> Result<()> {
                     !m.file_type().is_symlink(),
                     "Symbolic link requires manual review"
                 );
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    ensure!(
-                        m.file_attributes() & 0x400 == 0,
-                        "Reparse point requires manual review"
-                    );
-                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             Err(e) => return Err(e.into()),
@@ -175,23 +133,9 @@ fn write_access(path: &Path) -> Result<()> {
         let e = e?;
         let m = e.metadata()?;
         ensure!(
-            !m.permissions().readonly() || (cfg!(windows) && m.is_dir()),
+            !m.permissions().readonly(),
             "Read-only resource; write blocked"
         );
-        #[cfg(windows)]
-        if m.is_file() {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::Storage::FileSystem::{
-                GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-            };
-            let handle = File::open(e.path())?;
-            let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-            ensure!(
-                unsafe { GetFileInformationByHandle(handle.as_raw_handle() as _, &mut info) } != 0
-                    && info.nNumberOfLinks == 1,
-                "Unverified or hard-linked resource; write blocked"
-            );
-        }
     }
     Ok(())
 }
@@ -208,7 +152,6 @@ pub fn snapshot(path: &Path) -> Result<Image> {
         check_path(file)?;
         let m = fs::metadata(file)?;
         ensure!(m.is_dir() || m.is_file(), "Unsupported file type");
-        #[cfg(unix)]
         let mode = {
             use std::os::unix::fs::MetadataExt;
             ensure!(
@@ -217,8 +160,6 @@ pub fn snapshot(path: &Path) -> Result<Image> {
             );
             m.mode() & 0o777
         };
-        #[cfg(not(unix))]
-        let mode = 0;
         let key = file
             .strip_prefix(path)?
             .components()
@@ -297,15 +238,10 @@ pub fn skill_review(tree: &Image, name: &str) -> Result<Vec<String>> {
             ));
         }
     }
-    let mut folded = BTreeSet::new();
     for (key, e) in tree {
         ensure!(
             key.is_empty() || key.split('/').all(safe_part),
             "Unsafe Skill path"
-        );
-        ensure!(
-            folded.insert(key.to_lowercase()),
-            "Case-insensitive name collision"
         );
         if !key.is_empty() {
             let parent = key.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
@@ -463,18 +399,6 @@ pub fn prepare(
         }
         _ => bail!("Unsupported action"),
     }
-    #[cfg(unix)]
-    if t.kind == Kind::Skill {
-        for e in after.values_mut() {
-            if e.mode == 0 {
-                e.mode = if e.directory { 0o700 } else { 0o600 };
-            }
-        }
-    }
-    #[cfg(windows)]
-    for e in after.values_mut() {
-        e.mode = 0;
-    }
     ensure!(before != after, "No changes");
     Ok(Plan {
         target: t,
@@ -556,7 +480,6 @@ fn install_file(path: &Path, e: &Entry, replace: bool) -> Result<()> {
     let mut f = NamedTempFile::new_in(parent)?;
     f.write_all(&e.data)?;
     f.as_file().sync_all()?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         f.as_file()
@@ -564,31 +487,6 @@ fn install_file(path: &Path, e: &Entry, replace: bool) -> Result<()> {
     }
     if !replace {
         f.persist_noclobber(path)?;
-        return Ok(());
-    }
-    #[cfg(windows)]
-    if path.exists() {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-        let w = |p: &Path| {
-            p.as_os_str()
-                .encode_wide()
-                .chain(Some(0))
-                .collect::<Vec<_>>()
-        };
-        let temporary = f.into_temp_path();
-        let (dest, src) = (w(path), w(&temporary));
-        let ok = unsafe {
-            ReplaceFileW(
-                dest.as_ptr(),
-                src.as_ptr(),
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
-        ensure!(ok != 0, "Windows ACL-preserving replacement failed");
         return Ok(());
     }
     f.persist(path)?;
@@ -611,7 +509,6 @@ fn set_entry(path: &Path, from: Option<&Entry>, to: Option<&Entry>) -> Result<()
             if from.is_none() {
                 fs::create_dir_all(path)?
             }
-            #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(path, fs::Permissions::from_mode(e.mode))?;

@@ -142,19 +142,7 @@ async fn stdio(v: &Value, project: &Path) -> Result<Vec<String>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear();
-    for key in [
-        "PATH",
-        "HOME",
-        "USERPROFILE",
-        "SystemRoot",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "TEMP",
-        "TMP",
-        "LANG",
-    ]
-    .into_iter()
-    .chain(
+    for key in ["PATH", "HOME", "LANG", "TMPDIR"].into_iter().chain(
         v["env_vars"]
             .as_array()
             .into_iter()
