@@ -288,6 +288,7 @@ impl Scanner<'_> {
         self.doc_at(p, k, s, path, 0);
     }
     fn doc_at(&mut self, p: Provider, k: Kind, s: Scope, path: &Path, depth: u8) {
+        self.r.discovery_paths.files.insert(path.to_owned());
         if !path.is_file() {
             return;
         }
@@ -341,13 +342,12 @@ impl Scanner<'_> {
                 } else {
                     path.parent().unwrap().join(relative)
                 };
-                if child.is_file() {
-                    self.doc_at(p, k, Scope::Reference, &child, depth + 1);
-                }
+                self.doc_at(p, k, Scope::Reference, &child, depth + 1);
             }
         }
     }
     fn directory(&mut self, p: Provider, k: Kind, s: Scope, root: &Path) {
+        self.r.discovery_paths.directories.insert(root.to_owned());
         if !root.is_dir() {
             return;
         }
@@ -380,6 +380,7 @@ impl Scanner<'_> {
         }
     }
     fn config(&mut self, p: Provider, s: Scope, path: &Path) {
+        self.r.discovery_paths.files.insert(path.to_owned());
         if !path.is_file() {
             return;
         }
@@ -502,13 +503,21 @@ impl Scanner<'_> {
                     } else {
                         parent.join(reference)
                     };
-                    if !reference.contains("://") && dest.exists() {
+                    let local = !reference.contains("://");
+                    if local && dest.exists() {
                         if k == Kind::Skill {
                             self.directory(p, k, Scope::Reference, &dest)
                         } else if dest.is_file() {
                             self.doc(p, k, Scope::Reference, &dest)
                         }
                     } else {
+                        if local {
+                            if k == Kind::Skill {
+                                self.r.discovery_paths.directories.insert(dest);
+                            } else {
+                                self.r.discovery_paths.files.insert(dest);
+                            }
+                        }
                         self.add(Candidate {
                             provider: p,
                             kind: k,
@@ -530,6 +539,7 @@ impl Scanner<'_> {
         let c = self.c;
         if p == Provider::Codex {
             let cache = c.codex.join("plugins/cache");
+            self.r.discovery_paths.directories.insert(cache.clone());
             for e in WalkDir::new(cache)
                 .max_depth(7)
                 .into_iter()
@@ -652,7 +662,7 @@ impl Scanner<'_> {
                                         for install in installs {
                                             if let Some(d) = install["installPath"].as_str() {
                                                 let dir = Path::new(d);
-                                                if dir.is_absolute() && dir.is_dir() {
+                                                if dir.is_absolute() {
                                                     for (f, k) in [
                                                         ("skills", Kind::Skill),
                                                         ("agents", Kind::Agent),
@@ -688,6 +698,7 @@ impl Scanner<'_> {
         }
         for path in policy_files(c, p) {
             if path.is_dir() {
+                self.r.discovery_paths.directories.insert(path.clone());
                 for e in WalkDir::new(&path)
                     .max_depth(1)
                     .into_iter()

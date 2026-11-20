@@ -92,9 +92,9 @@ struct App {
     watch_paths: BTreeSet<PathBuf>,
     tx: mpsc::Sender<Result<Output>>,
     rx: mpsc::Receiver<Result<Output>>,
-    watched: mpsc::Receiver<()>,
+    watched: mpsc::Receiver<notify::Event>,
     watcher: Option<RecommendedWatcher>,
-    last: Instant,
+    last_scan_finished: Option<Instant>,
     changed: Option<Instant>,
 }
 const KINDS: [Kind; 7] = [
@@ -128,8 +128,10 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let (wtx, watched) = mpsc::channel();
         let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            if result.is_ok_and(|e| !matches!(e.kind, notify::EventKind::Access(_))) {
-                let _ = wtx.send(());
+            if let Ok(event) = result {
+                if !event.kind.is_access() {
+                    let _ = wtx.send(event);
+                }
             }
         })
         .ok();
@@ -153,7 +155,7 @@ impl App {
             pinned: None,
             collapsed: Default::default(),
             scroll: 0,
-            status: String::new(),
+            status: "탐색 중".into(),
             job: None,
             pending_scan: true,
             scanning: None,
@@ -161,7 +163,7 @@ impl App {
             rx,
             watched,
             watcher,
-            last: Instant::now(),
+            last_scan_finished: None,
             changed: None,
         };
         a.configure_watches();
@@ -263,7 +265,6 @@ impl App {
     }
     fn scan(&mut self, rt: &Runtime) {
         self.pending_scan = false;
-        self.last = Instant::now();
         let cancel = cancel_token();
         let (tx, rx) = mpsc::channel();
         self.scanning = Some((cancel.clone(), rx));
@@ -301,6 +302,7 @@ impl App {
         self.status_filter = 0;
         self.pending_scan = true;
         self.changed = None;
+        self.last_scan_finished = None;
         self.status = "프로젝트 탐색 중".into();
         // The new root may require a different recursion mode for an existing watch.
         if let Some(w) = &mut self.watcher {
@@ -308,6 +310,7 @@ impl App {
                 let _ = w.unwatch(&p);
             }
         }
+        for _ in self.watched.try_iter() {}
         self.configure_watches();
         Ok(())
     }
@@ -340,10 +343,12 @@ impl App {
             match rx.try_recv() {
                 Ok(r) => {
                     self.scanning = None;
+                    self.last_scan_finished = Some(Instant::now());
                     self.scanned(r);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.scanning = None;
+                    self.last_scan_finished = Some(Instant::now());
                     self.status = "프로젝트 탐색이 중단됐습니다. r로 다시 시도하세요".into();
                 }
                 Err(mpsc::TryRecvError::Empty) => (),
@@ -375,7 +380,17 @@ impl App {
                 }
             }
         }
-        if self.watched.try_iter().count() > 0 {
+        // Wait for the first discovery to identify which queued paths matter.
+        if self.last_scan_finished.is_some()
+            && self
+                .watched
+                .try_iter()
+                .filter(|event| {
+                    event.need_rescan() || event.paths.iter().any(|p| self.r.watches_change_at(p))
+                })
+                .count()
+                > 0
+        {
             self.changed = Some(Instant::now())
         }
         if self
@@ -388,7 +403,10 @@ impl App {
         if self.scanning.is_none()
             && self.job.is_none()
             && matches!(self.view, View::Explore | View::Search(_))
-            && (self.pending_scan || self.last.elapsed() > Duration::from_secs(30))
+            && (self.pending_scan
+                || self
+                    .last_scan_finished
+                    .is_some_and(|last| last.elapsed() > Duration::from_secs(30)))
         {
             self.scan(rt);
         }
@@ -570,7 +588,10 @@ impl App {
                     self.status =
                         "비교 기준을 선택했습니다. 다른 자산의 Diff 탭에서 비교하세요".into()
                 }
-                K::Char('r') => self.pending_scan = true,
+                K::Char('r') => {
+                    self.pending_scan = true;
+                    self.status = "탐색 중".into();
+                }
                 K::Char('x') => {
                     if let Some(j) = &self.job {
                         if !j.mutable {
@@ -733,18 +754,8 @@ impl App {
         } else {
             "f 폴더  j/k 이동  Tab 상세 탭  / 검색  : 명령  ? 도움말  ! 상태  q 종료"
         };
-        let footer = format!(
-            " {}   {}\n {controls}",
-            self.job
-                .as_ref()
-                .map(|j| j.label)
-                .unwrap_or(if self.scanning.is_some() {
-                    "탐색 중"
-                } else {
-                    ""
-                }),
-            self.status
-        );
+        let status = self.job.as_ref().map_or(self.status.as_str(), |j| j.label);
+        let footer = format!(" {status}\n {controls}");
         f.render_widget(Paragraph::new(footer), areas[2]);
         let modal=match &self.view{
  View::Text(t,s)=>Some((t.clone(),s.clone())),View::Command(buf)=>Some(("명령 팔레트 · Tab 완성 · Enter 실행".into(),format!(": {buf}\n\n{}",COMMANDS.iter().filter(|s|s.starts_with(buf.as_str())).copied().collect::<Vec<_>>().join("\n")))),
@@ -942,6 +953,48 @@ pub fn run(rt: Runtime, context: Context, state: PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_events_refresh_discovery_inputs_and_ignore_runtime_files() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir(&project)?;
+        let ctx = Context::isolated(home, project, "fixture".into());
+        let mut app = App::new(ctx, tmp.path().join("state"))?;
+        let (wtx, watched) = mpsc::channel();
+        app.watched = watched;
+        let (scan_tx, scan_rx) = mpsc::channel();
+        app.scanning = Some((cancel_token(), scan_rx));
+        app.pending_scan = false;
+        let rt = tokio::runtime::Builder::new_current_thread().build()?;
+        let event = |path| notify::Event::new(notify::EventKind::Any).add_path(path);
+
+        // A CLI can write runtime files before the first scan returns.
+        wtx.send(event(app.context.codex.join("log/verify.log")))?;
+        wtx.send(event(app.context.project.join("build.log")))?;
+        app.tick(&rt);
+        scan_tx.send(agenthub_core::adapter::discover(
+            &app.context,
+            Default::default(),
+        ))?;
+        app.tick(&rt);
+        assert!(app.changed.is_none());
+
+        for path in [
+            app.context.config(Provider::Claude, Scope::Project),
+            app.context.config(Provider::Codex, Scope::Global),
+            app.context
+                .skills(Provider::Codex, Scope::Project)
+                .join("new/SKILL.md"),
+            app.context.project.join(".agents"),
+        ] {
+            wtx.send(event(path))?;
+            app.tick(&rt);
+            assert!(app.changed.take().is_some());
+        }
+        Ok(())
+    }
 
     #[test]
     fn switching_projects_discards_pending_results_and_replaces_watches() -> Result<()> {
